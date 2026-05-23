@@ -86,13 +86,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun safelyFinish() {
-        // Run on the next main handler loop so the window is fully attached,
-        // allowing the system to perform clean input channel disposal.
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (!isFinishing) {
-                finish()
-                overridePendingTransition(0, 0) // Eliminate task transition flicker
-            }
+        if (!isFinishing) {
+            finish()
+            overridePendingTransition(0, 0) // Eliminate task transition flicker
         }
     }
 

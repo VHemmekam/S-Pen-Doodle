@@ -41,16 +41,16 @@ object DoodleState {
     // Shared list of active paths currently visible on the canvas
     val activePaths = mutableStateListOf<DoodlePath>()
 
-    // Preset color palette (High-contrast, glowing neon shades perfect for drawing overlaying video)
+    // Preset color palette (High-contrast, glowing neon shades defined from exact Hue/Tone values to perfectly match custom sliders!)
     val colorPalette = listOf(
-        Color(0xFF818CF8), // Frosted Indigo
-        Color(0xFFF472B6), // Frosted Pink
-        Color(0xFF39FF14), // Neon Green
-        Color(0xFF00F5FF), // Neon Cyan
-        Color(0xFFFFF700), // Neon Yellow
-        Color(0xFFFF5E00), // Neon Orange
-        Color(0xFFFFFFFF), // Pure White
-        Color(0xFFFF3366)  // Electric Red (instead of invisible Obsidian Black on black menu!)
+        Color.hsv(235f, 0.6f, 1.0f),  // Glowing Neon Indigo (Tone = 0.70)
+        Color.hsv(325f, 0.65f, 1.0f), // Glowing Neon Pink (Tone = 0.675)
+        Color.hsv(110f, 1.0f, 1.0f),  // Glowing Neon Green (Tone = 0.50)
+        Color.hsv(180f, 1.0f, 1.0f),  // Glowing Neon Cyan (Tone = 0.50)
+        Color.hsv(55f, 1.0f, 1.0f),   // Glowing Neon Yellow (Tone = 0.50)
+        Color.hsv(25f, 1.0f, 1.0f),   // Glowing Neon Orange (Tone = 0.50)
+        Color.hsv(0f, 0.0f, 1.0f),    // Pure White (Tone = 1.00)
+        Color.hsv(0f, 1.0f, 1.0f)     // Glowing Electric Red (Tone = 0.50)
     )
 
     // Preset fade times options

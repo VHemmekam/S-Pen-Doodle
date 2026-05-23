@@ -26,6 +26,7 @@
             android:label="@string/app_name"
             android:theme="@style/Theme.TransparentActivity"
             android:launchMode="singleInstance"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|density"
             android:stateNotNeeded="true"
             android:excludeFromRecents="true"
             android:taskAffinity=""
