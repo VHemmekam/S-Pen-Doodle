@@ -1,8 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:width="66dp"
-        android:height="66dp"
-        android:drawable="@drawable/launcher_foreground_1779539206797"
-        android:gravity="center" />
-</layer-list>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/apk/res-auto"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+
+    <!-- Elegant custom continuous drawing doodle curve matching the Permission activity graphics exactly -->
+    <path
+        android:pathData="M 30,42 C 30,30 45,26 50,34 C 55,42 45,52 50,62 C 55,72 70,64 70,51 C 70,40 63,36 55,38 C 48,40 44,48 40,52 C 36,56 32,64 38,70"
+        android:strokeWidth="5"
+        android:strokeColor="#6366F1"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="30"
+                android:startY="30"
+                android:endX="70"
+                android:endY="70"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF6366F1" /> <!-- Indigo -->
+                <item android:offset="0.5" android:color="#FFA855F7" /> <!-- Purple -->
+                <item android:offset="1.0" android:color="#FFEC4899" /> <!-- Pink -->
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

@@ -40,14 +40,21 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -61,6 +68,11 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 class ServiceLifecycleOwner : LifecycleOwner, ViewModelStoreOwner, SavedStateRegistryOwner {
@@ -101,6 +113,8 @@ class DoodleOverlayService : Service() {
     private lateinit var canvasParams: WindowManager.LayoutParams
     private lateinit var controlParams: WindowManager.LayoutParams
 
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
     // Track position coordinates for draggable floating pill
     private var controlX = 100
     private var controlY = 200
@@ -117,7 +131,28 @@ class DoodleOverlayService : Service() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         
         setupNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification())
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification(),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification())
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            try {
+                // Fallback: Try to start without type to prevent app crash under strict OS environments
+                startForeground(NOTIFICATION_ID, createNotification())
+            } catch (ex: Exception) {
+                ex.printStackTrace()
+            }
+        }
+
+        // Initialize and load saved user settings from SharedPreferences
+        DoodleState.init(this)
 
         DoodleState.isServiceRunning.value = true
 
@@ -126,6 +161,47 @@ class DoodleOverlayService : Service() {
 
         showCanvasOverlay()
         showControlOverlay()
+
+        // Spin up observers to write changes to local storage reactively
+        serviceScope.launch {
+            DoodleState.brushWidth.collect {
+                DoodleState.save(this@DoodleOverlayService, "brush_width", it)
+            }
+        }
+        serviceScope.launch {
+            DoodleState.brushColor.collect { color ->
+                val argb = ((color.alpha * 255.0f + 0.5f).toInt() shl 24) or
+                           ((color.red * 255.0f + 0.5f).toInt() shl 16) or
+                           ((color.green * 255.0f + 0.5f).toInt() shl 8) or
+                           (color.blue * 255.0f + 0.5f).toInt()
+                DoodleState.save(this@DoodleOverlayService, "brush_color", argb)
+            }
+        }
+        serviceScope.launch {
+            DoodleState.fadeTimeSeconds.collect {
+                DoodleState.save(this@DoodleOverlayService, "fade_time_seconds", it)
+            }
+        }
+        serviceScope.launch {
+            DoodleState.isTouchThrough.collect {
+                DoodleState.save(this@DoodleOverlayService, "is_touch_through", it)
+            }
+        }
+        serviceScope.launch {
+            DoodleState.customColorHue.collect {
+                DoodleState.save(this@DoodleOverlayService, "custom_color_hue", it)
+            }
+        }
+        serviceScope.launch {
+            DoodleState.customColorSat.collect {
+                DoodleState.save(this@DoodleOverlayService, "custom_color_sat", it)
+            }
+        }
+        serviceScope.launch {
+            DoodleState.customColorVal.collect {
+                DoodleState.save(this@DoodleOverlayService, "custom_color_val", it)
+            }
+        }
     }
 
     private fun setupNotificationChannel() {
@@ -251,12 +327,58 @@ class DoodleOverlayService : Service() {
                     onDrag = { dx, dy ->
                         controlX += dx.roundToInt()
                         controlY += dy.roundToInt()
+                        
+                        val displayMetrics = resources.displayMetrics
+                        val screenWidth = displayMetrics.widthPixels
+                        val screenHeight = displayMetrics.heightPixels
+                        controlX = controlX.coerceIn(0, screenWidth - 100)
+                        controlY = controlY.coerceIn(0, screenHeight - 150)
+                        
                         controlParams.x = controlX
                         controlParams.y = controlY
                         try {
                             windowManager.updateViewLayout(this@apply, controlParams)
                         } catch (e: Exception) {
                             e.printStackTrace()
+                        }
+                    },
+                    onExpandChanged = { expanded ->
+                        val displayMetrics = resources.displayMetrics
+                        val screenWidth = displayMetrics.widthPixels
+                        val density = displayMetrics.density
+                        val minimizedWidth = 48 * density
+                        val expandedWidth = 180 * density
+                        
+                        if (controlX > screenWidth / 2) {
+                            val diff = (expandedWidth - minimizedWidth).toInt()
+                            if (expanded) {
+                                controlX = (controlX - diff).coerceAtLeast(0)
+                            } else {
+                                controlX = (controlX + diff).coerceAtMost(screenWidth - minimizedWidth.toInt())
+                            }
+                            controlParams.x = controlX
+                            try {
+                                windowManager.updateViewLayout(controlView, controlParams)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+                    },
+                    onColorMenuToggled = { showMenu ->
+                        if (showMenu) {
+                            val displayMetrics = resources.displayMetrics
+                            val screenHeight = displayMetrics.heightPixels
+                            val density = displayMetrics.density
+                            val fullHeight = 270 * density
+                            if (controlY + fullHeight > screenHeight) {
+                                controlY = (screenHeight - fullHeight).toInt().coerceAtLeast(0)
+                                controlParams.y = controlY
+                                try {
+                                    windowManager.updateViewLayout(controlView, controlParams)
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
                         }
                     },
                     onClose = {
@@ -272,6 +394,13 @@ class DoodleOverlayService : Service() {
 
     override fun onDestroy() {
         DoodleState.isServiceRunning.value = false
+        serviceScope.cancel()
+        
+        try {
+            stopForeground(true)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         
         canvasView?.let {
             try { windowManager.removeView(it) } catch (e: Exception) { e.printStackTrace() }
@@ -292,122 +421,170 @@ fun OverlayDrawingCanvas() {
     val paths = DoodleState.activePaths
     val brushColor by DoodleState.brushColor.collectAsState()
     val brushWidth by DoodleState.brushWidth.collectAsState()
-    val fadeTimeSeconds by DoodleState.fadeTimeSeconds.collectAsState()
     val sPenOnlyMode by DoodleState.sPenOnlyMode.collectAsState()
     val isTouchThrough by DoodleState.isTouchThrough.collectAsState()
+    val isEraserMode by DoodleState.isEraserMode.collectAsState()
 
     val density = LocalDensity.current
-    val brushWidthPx = remember(brushWidth) { with(density) { brushWidth.dp.toPx() } }
+    // Dynamically calculate brush width in pixels based on user's selected size
+    val brushWidthPx = with(density) { brushWidth.dp.toPx() }
 
     var currentTime by remember { mutableStateOf(System.currentTimeMillis()) }
 
-    // Redraw loop to animate fading paths beautifully (60 FPS)
-    LaunchedEffect(paths.size, fadeTimeSeconds) {
-        if (fadeTimeSeconds != Float.MAX_VALUE) {
-            while (true) {
-                currentTime = System.currentTimeMillis()
-                // Safely remove faded out paths to prevent piling up memory
-                val threshold = (fadeTimeSeconds * 1000).toLong()
-                val iterator = DoodleState.activePaths.iterator()
-                while (iterator.hasNext()) {
-                    val path = iterator.next()
-                    if (currentTime - path.initialTimestamp >= threshold) {
-                        iterator.remove()
-                    }
-                }
-                delay(16) // ~60fps
+    // Redraw loop that drives smooth 60fps trail fading and manages expired paths memory cleanup
+    LaunchedEffect(Unit) {
+        while (true) {
+            currentTime = System.currentTimeMillis()
+            
+            // Clean up fully expired paths (paths where the newest/last point is older than 3 seconds)
+            val expiredPaths = DoodleState.activePaths.filter { path ->
+                val lastPoint = path.points.lastOrNull()
+                lastPoint != null && (currentTime - lastPoint.timestamp >= 3000L)
             }
+            
+            if (expiredPaths.isNotEmpty()) {
+                DoodleState.activePaths.removeAll(expiredPaths)
+            }
+            
+            delay(16) // Solid 60 FPS driving frame updates
         }
     }
 
     Canvas(
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(isTouchThrough, sPenOnlyMode) {
+            .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen) // Crucial for BlendMode.Clear to erase
+            .pointerInput(isTouchThrough, sPenOnlyMode, isEraserMode) {
                 if (isTouchThrough) return@pointerInput
                 
-                var currentPoints = mutableListOf<DoodlePoint>()
+                val activePointers = mutableMapOf<PointerId, Long>()
+                val pointerPoints = mutableMapOf<PointerId, MutableList<DoodlePoint>>()
                 
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent()
-                        // Find the primary changes
-                        val change = event.changes.firstOrNull() ?: continue
                         
-                        // Handle Stylus constraint
-                        val isStylus = change.type == PointerType.Stylus || change.type == PointerType.Eraser
-                        if (sPenOnlyMode && !isStylus) {
-                            // S Pen only is active, hand palm & other fingers are rejected!
-                            continue
-                        }
-
-                        val pos = change.position
-                        // Gracefully check pressure sensitivity
-                        val pressure = try { change.pressure } catch (e: Exception) { 1.0f }
-
-                        if (change.pressed) {
-                            if (change.previousPressed.not()) {
-                                // Down gesture: Start new trail path
-                                currentPoints = mutableListOf(DoodlePoint(pos.x, pos.y, pressure))
-                                DoodleState.addPath(currentPoints, brushColor, brushWidthPx)
-                            } else {
-                                // Move gesture: Flow path drawing
-                                currentPoints.add(DoodlePoint(pos.x, pos.y, pressure))
-                                if (DoodleState.activePaths.isNotEmpty()) {
-                                    val lastIdx = DoodleState.activePaths.size - 1
-                                    val lastPath = DoodleState.activePaths[lastIdx]
-                                    DoodleState.activePaths[lastIdx] = lastPath.copy(
-                                        points = lastPath.points + DoodlePoint(pos.x, pos.y, pressure)
-                                    )
-                                }
+                        event.changes.forEach { change ->
+                            // Handle Stylus constraint
+                            val isStylus = change.type == PointerType.Stylus || change.type == PointerType.Eraser
+                            if (sPenOnlyMode && !isStylus) {
+                                return@forEach
                             }
-                            change.consume()
-                        } else if (change.previousPressed) {
-                            // Up gesture: Complete path
-                            currentPoints = mutableListOf()
-                            change.consume()
+     
+                            val pointerId = change.id
+                            val pos = change.position
+                            val pressure = try { change.pressure } catch (e: Exception) { 1.0f }
+                            val now = System.currentTimeMillis()
+     
+                            if (change.pressed) {
+                                val isNewPath = !change.previousPressed || !activePointers.containsKey(pointerId)
+                                if (isNewPath) {
+                                    // Down gesture: Start new path or eraser stroke with current timestamp
+                                    val pathId = System.nanoTime()
+                                    val currentPoints = mutableListOf(DoodlePoint(pos.x, pos.y, pressure, now))
+                                    pointerPoints[pointerId] = currentPoints
+                                    activePointers[pointerId] = pathId
+                                    
+                                    val currentWidthPx = with(density) { DoodleState.brushWidth.value.dp.toPx() }
+                                    val currentColor = DoodleState.brushColor.value
+                                    
+                                    val newPath = DoodlePath(
+                                        id = pathId,
+                                        points = currentPoints.toList(),
+                                        color = currentColor,
+                                        strokeWidth = currentWidthPx,
+                                        isEraser = isEraserMode
+                                    )
+                                    DoodleState.activePaths.add(newPath)
+                                } else {
+                                    // Move gesture: Interpolate intermediate points to prevent dots/gaps under fast drag
+                                    val currentPoints = pointerPoints[pointerId] ?: mutableListOf()
+                                    if (currentPoints.isNotEmpty()) {
+                                        val lastPoint = currentPoints.last()
+                                        val dx = pos.x - lastPoint.x
+                                        val dy = pos.y - lastPoint.y
+                                        val distance = kotlin.math.sqrt(dx * dx + dy * dy)
+                                        val stepSize = 8.0f // Butter smooth sampling intervals
+                                        if (distance > stepSize) {
+                                            val steps = (distance / stepSize).toInt()
+                                            val dt = now - lastPoint.timestamp
+                                            val dp = pressure - lastPoint.pressure
+                                            for (step in 1 until steps) {
+                                                val fraction = step.toFloat() / steps
+                                                val interpX = lastPoint.x + dx * fraction
+                                                val interpY = lastPoint.y + dy * fraction
+                                                val interpP = lastPoint.pressure + dp * fraction
+                                                val interpT = lastPoint.timestamp + (dt * fraction).toLong()
+                                                currentPoints.add(DoodlePoint(interpX, interpY, interpP, interpT))
+                                            }
+                                        }
+                                    }
+                                    currentPoints.add(DoodlePoint(pos.x, pos.y, pressure, now))
+                                    
+                                    // Clean up points older than 3 seconds inline to keep memory footprint minuscule and rendering at high FPS!
+                                    val limit = System.currentTimeMillis()
+                                    currentPoints.removeAll { limit - it.timestamp >= 3000L }
+                                    
+                                    val pathId = activePointers[pointerId]
+                                    if (pathId != null) {
+                                        val index = DoodleState.activePaths.indexOfFirst { it.id == pathId }
+                                        if (index != -1) {
+                                            val existingPath = DoodleState.activePaths[index]
+                                            DoodleState.activePaths[index] = existingPath.copy(
+                                                points = currentPoints.toList()
+                                            )
+                                        }
+                                    }
+                                }
+                                change.consume()
+                            } else if (change.previousPressed) {
+                                // Up gesture: Complete path
+                                activePointers.remove(pointerId)
+                                pointerPoints.remove(pointerId)
+                                change.consume()
+                            }
                         }
                     }
                 }
             }
     ) {
         for (doodlePath in paths) {
-            val ageSec = (currentTime - doodlePath.initialTimestamp) / 1000f
-            val alpha = if (fadeTimeSeconds == Float.MAX_VALUE) {
-                1.0f
-            } else {
-                (1.0f - (ageSec / fadeTimeSeconds)).coerceIn(0f, 1f)
-            }
-
-            if (alpha > 0f) {
-                val pts = doodlePath.points
-                if (pts.isEmpty()) continue
-
-                // High visual premium design: render pressure-sensitive segments for S Pen
-                if (pts.size == 1) {
-                    val p = pts.first()
+            val pts = doodlePath.points
+            if (pts.isEmpty()) continue
+ 
+            val isEraser = doodlePath.isEraser
+ 
+            if (pts.size == 1) {
+                val p = pts.first()
+                val ageSec = (currentTime - p.timestamp) / 1000f
+                val alpha = (1.0f - (ageSec / 3.0f)).coerceIn(0f, 1f)
+                if (alpha > 0f) {
                     drawCircle(
-                        color = doodlePath.color,
+                        color = if (isEraser) Color.Transparent else doodlePath.color,
                         radius = doodlePath.strokeWidth / 2f,
                         center = Offset(p.x, p.y),
-                        alpha = alpha
+                        alpha = if (isEraser) 1.0f else alpha,
+                        blendMode = if (isEraser) BlendMode.Clear else BlendMode.Src
                     )
-                } else {
-                    for (i in 0 until pts.size - 1) {
-                        val p1 = pts[i]
-                        val p2 = pts[i + 1]
-
-                        // Line thickness modulated by physical pen pressure dynamically!
-                        val avgPressure = (p1.pressure + p2.pressure) / 2f
-                        val segmentWidth = doodlePath.strokeWidth * (0.3f + avgPressure * 1.4f)
-
+                }
+            } else {
+                for (i in 0 until pts.size - 1) {
+                    val p1 = pts[i]
+                    val p2 = pts[i + 1]
+ 
+                    val avgTimestamp = (p1.timestamp + p2.timestamp) / 2
+                    val ageSec = (currentTime - avgTimestamp) / 1000f
+                    val alpha = (1.0f - (ageSec / 3.0f)).coerceIn(0f, 1f)
+ 
+                    if (alpha > 0f) {
                         drawLine(
-                            color = doodlePath.color,
+                            color = if (isEraser) Color.Transparent else doodlePath.color,
                             start = Offset(p1.x, p1.y),
                             end = Offset(p2.x, p2.y),
-                            strokeWidth = segmentWidth,
+                            strokeWidth = doodlePath.strokeWidth, // Fixed width prevents dotted bumpy fluctuations
                             cap = StrokeCap.Round,
-                            alpha = alpha
+                            alpha = if (isEraser) 1.0f else alpha,
+                            blendMode = if (isEraser) BlendMode.Clear else BlendMode.Src
                         )
                     }
                 }
@@ -417,330 +594,472 @@ fun OverlayDrawingCanvas() {
 }
 
 @Composable
+fun PresetColorDot(
+    color: Color,
+    activeColor: Color,
+    onClick: () -> Unit
+) {
+    val isSelected = activeColor == color
+    Box(
+        modifier = Modifier
+            .size(24.dp)
+            .clip(CircleShape)
+            .background(color)
+            .border(
+                width = if (isSelected) 2.dp else 1.dp,
+                color = if (isSelected) Color.White else Color.White.copy(alpha = 0.35f),
+                shape = CircleShape
+            )
+            .clickable { onClick() }
+    )
+}
+
+@Composable
 fun FloatingControlUI(
     onDrag: (Float, Float) -> Unit,
+    onExpandChanged: (Boolean) -> Unit,
+    onColorMenuToggled: (Boolean) -> Unit,
     onClose: () -> Unit
 ) {
     var isExpanded by remember { mutableStateOf(true) }
     var showColorMenu by remember { mutableStateOf(false) }
-    var showWidthMenu by remember { mutableStateOf(false) }
-    var showFadeMenu by remember { mutableStateOf(false) }
 
-    val brushWidth by DoodleState.brushWidth.collectAsState()
     val brushColor by DoodleState.brushColor.collectAsState()
-    val fadeTimeSeconds by DoodleState.fadeTimeSeconds.collectAsState()
-    val isTouchThrough by DoodleState.isTouchThrough.collectAsState()
-    val sPenOnlyMode by DoodleState.sPenOnlyMode.collectAsState()
-    
+    val brushWidth by DoodleState.brushWidth.collectAsState()
+
+    LaunchedEffect(isExpanded) {
+        onExpandChanged(isExpanded)
+    }
+
     Card(
-        shape = RoundedCornerShape(28.dp),
+        shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(
-            containerColor = Color(0xFF090D16).copy(alpha = 0.75f), // Authentic slate-900/60 frosted backing
+            containerColor = Color.Black.copy(alpha = 0.35f), // More transparent thin elegant background
             contentColor = Color.White
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp), // Strict REQUIREMENT: No shadow
         modifier = Modifier
-            .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    onDrag(dragAmount.x, dragAmount.y)
-                }
-            }
-            .border(1.5.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(28.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(24.dp))
             .padding(2.dp)
     ) {
         if (!isExpanded) {
             // Minimized Bubble Layout: highly discreet while watching screens
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(6.dp)
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.35f))
+                    .border(1.5.dp, brushColor, CircleShape)
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            onDrag(dragAmount.x, dragAmount.y)
+                        }
+                    }
+                    .padding(4.dp),
+                contentAlignment = Alignment.Center
             ) {
                 IconButton(
                     onClick = { isExpanded = true },
-                    modifier = Modifier.size(38.dp)
+                    modifier = Modifier.fillMaxSize()
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Create,
-                        contentDescription = "Expand controls",
-                        tint = brushColor,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-        } else {
-            // Expanded Control panel with premium pill layout
-            Column(
-                modifier = Modifier
-                    .width(IntrinsicSize.Min)
-                    .padding(10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                // Top Draggable bar grip
-                Box(
-                    modifier = Modifier
-                        .width(36.dp)
-                        .height(4.dp)
-                        .background(Color.White.copy(alpha = 0.25f), CircleShape)
-                        .padding(bottom = 6.dp)
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    // Pen Mode / Watch-through Mode Toggle button with distinct glowing indicator
-                    FilledIconToggleButton(
-                        checked = isTouchThrough,
-                        onCheckedChange = { DoodleState.isTouchThrough.value = it },
-                        modifier = Modifier.size(36.dp),
-                        colors = IconButtonDefaults.filledIconToggleButtonColors(
-                            containerColor = Color.White.copy(alpha = 0.08f),
-                            contentColor = Color.White.copy(alpha = 0.8f),
-                            checkedContainerColor = Color(0xFFF472B6), // Gorgeous frosted Pink
-                            checkedContentColor = Color(0xFF020617)
-                        )
-                    ) {
-                        Icon(
-                            imageVector = if (isTouchThrough) Icons.Default.PlayArrow else Icons.Default.Edit,
-                            contentDescription = "Toggle modes",
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    // Brush Color Selector Button
-                    IconButton(
-                        onClick = {
-                            showColorMenu = !showColorMenu
-                            showWidthMenu = false
-                            showFadeMenu = false
-                        },
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(Color.White.copy(alpha = 0.08f), CircleShape)
+                    // Custom drawn neat plus icon
+                    Box(
+                        modifier = Modifier.size(24.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(16.dp)
+                                .width(14.dp)
+                                .height(2.5.dp)
+                                .background(brushColor, RoundedCornerShape(1.dp))
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(2.5.dp)
+                                .height(14.dp)
+                                .background(brushColor, RoundedCornerShape(1.dp))
+                        )
+                    }
+                }
+            }
+        } else {
+            // Expanded Control panel: extremely simple with 4 spaced compact buttons & absolutely zero labels!
+            Column(
+                modifier = Modifier.width(190.dp), // COMPACT WIDTH guarantees NO overlapping and NO excessive padding!
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceEvenly, // Perfectly distributes space for 4 compact buttons
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pointerInput(Unit) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                onDrag(dragAmount.x, dragAmount.y)
+                            }
+                        }
+                        .padding(horizontal = 8.dp, vertical = 8.dp)
+                ) {
+                    // 1. Color Picker indicator button
+                    Box(
+                        modifier = Modifier
+                            .size(26.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (showColorMenu) Color.White.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.08f)
+                            )
+                            .clickable {
+                                showColorMenu = !showColorMenu
+                                onColorMenuToggled(showColorMenu)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val previewSize = (5f + (brushWidth - 2f) * (10f / 22f)).dp.coerceIn(5.dp, 16.dp)
+                        Box(
+                            modifier = Modifier
+                                .size(previewSize)
                                 .background(brushColor, CircleShape)
                                 .border(1.dp, Color.White, CircleShape)
                         )
                     }
 
-                    // Stroke Size Button
-                    IconButton(
-                        onClick = {
-                            showWidthMenu = !showWidthMenu
-                            showColorMenu = false
-                            showFadeMenu = false
-                        },
+                    // 2. Click-Through Toggle button (glowing green/lock state feedback)
+                    val isTouchThrough by DoodleState.isTouchThrough.collectAsState()
+                    Box(
                         modifier = Modifier
-                            .size(36.dp)
-                            .background(Color.White.copy(alpha = 0.08f), CircleShape)
+                            .size(26.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isTouchThrough) Color(0xFF34C759).copy(alpha = 0.25f) else Color.White.copy(alpha = 0.08f)
+                            )
+                            .clickable {
+                                DoodleState.isTouchThrough.value = !isTouchThrough
+                            },
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Star,
-                            contentDescription = "Brush width options",
-                            tint = Color.White.copy(alpha = 0.9f),
-                            modifier = Modifier.size(18.dp)
+                            imageVector = if (isTouchThrough) Icons.Default.Lock else Icons.Default.Edit,
+                            contentDescription = "Toggle Click-Through Mode",
+                            tint = if (isTouchThrough) Color(0xFF30D158) else Color.White,
+                            modifier = Modifier.size(12.dp)
                         )
                     }
 
-                    // Trail Fades Button
-                    IconButton(
-                        onClick = {
-                            showFadeMenu = !showFadeMenu
-                            showColorMenu = false
-                            showWidthMenu = false
-                        },
+                    // 3. Minimize button (Minus icon)
+                    Box(
                         modifier = Modifier
-                            .size(36.dp)
-                            .background(Color.White.copy(alpha = 0.08f), CircleShape)
+                            .size(26.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .clickable { 
+                                showColorMenu = false
+                                isExpanded = false 
+                            },
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Fade timing options",
-                            tint = Color.White.copy(alpha = 0.9f),
-                            modifier = Modifier.size(18.dp)
+                        // Custom drawn neat minus icon
+                        Box(
+                            modifier = Modifier
+                                .width(9.dp)
+                                .height(1.8.dp)
+                                .background(Color.White, RoundedCornerShape(1.dp))
                         )
                     }
 
-                    // S Pen Only Mode Toggle
-                    FilledIconToggleButton(
-                        checked = sPenOnlyMode,
-                        onCheckedChange = { DoodleState.sPenOnlyMode.value = it },
-                        modifier = Modifier.size(36.dp),
-                        colors = IconButtonDefaults.filledIconToggleButtonColors(
-                            containerColor = Color.White.copy(alpha = 0.08f),
-                            contentColor = Color.White.copy(alpha = 0.8f),
-                            checkedContainerColor = Color(0xFF818CF8), // Elegant frosted Indigo
-                            checkedContentColor = Color(0xFF020617)
-                        )
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Build,
-                            contentDescription = "S Pen Only Mode",
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-
-                    // Clear Canvas
-                    IconButton(
-                        onClick = { DoodleState.clear() },
+                    // 4. Close icon to exit completely
+                    Box(
                         modifier = Modifier
-                            .size(36.dp)
-                            .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Delete,
-                            contentDescription = "Clear board",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    // Minimize
-                    IconButton(
-                        onClick = { isExpanded = false },
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(Color.White.copy(alpha = 0.08f), CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowUp,
-                            contentDescription = "Minimize menu",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    // Close service
-                    IconButton(
-                        onClick = onClose,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(Color(0xFFFF3B30).copy(alpha = 0.15f), CircleShape)
+                            .size(26.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFFF3B30).copy(alpha = 0.25f))
+                            .clickable { onClose() },
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Close overlay tracker",
-                            tint = Color(0xFFFF6B6B),
-                            modifier = Modifier.size(18.dp)
+                            tint = Color(0xFFFF453A),
+                            modifier = Modifier.size(12.dp)
                         )
                     }
                 }
 
-                // Dynamic Menus shown below the buttons bar when activated
-                AnimatedVisibility(visible = showColorMenu) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "Brush Colors",
-                            fontSize = 11.sp,
-                            color = Color.White.copy(alpha = 0.6f),
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
+                // Color Selection Submenu - Instant display (no laggy animation as requested)
+                if (showColorMenu) {
+                    val context = LocalContext.current
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp, start = 12.dp, end = 12.dp)
+                    ) {
+                        // Spacing from the main buttons Row
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        // Preset Colors Grid: 4x2 grid of circles with precise padding!
+                        // Row 1 of presets
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.padding(bottom = 4.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.padding(bottom = 8.dp)
                         ) {
-                            DoodleState.colorPalette.forEach { color ->
-                                Box(
-                                    modifier = Modifier
-                                        .size(24.dp)
-                                        .clip(CircleShape)
-                                        .background(color)
-                                        .border(
-                                            width = if (brushColor == color) 2.dp else 0.dp,
-                                            color = Color.White,
-                                            shape = CircleShape
-                                        )
-                                        .clickable {
-                                            DoodleState.brushColor.value = color
-                                            showColorMenu = false
-                                        }
-                                )
-                            }
-                        }
-                    }
-                }
-
-                AnimatedVisibility(visible = showWidthMenu) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(180.dp)) {
-                        Text(
-                            text = "Width: ${brushWidth.roundToInt()}dp",
-                            fontSize = 11.sp,
-                            color = Color.White.copy(alpha = 0.6f),
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                        Slider(
-                            value = brushWidth,
-                            onValueChange = { DoodleState.brushWidth.value = it },
-                            valueRange = 2f..24f,
-                            steps = 11,
-                            colors = SliderDefaults.colors(
-                                thumbColor = brushColor,
-                                activeTrackColor = brushColor,
-                                inactiveTrackColor = Color.White.copy(alpha = 0.2f)
-                            )
-                        )
-                    }
-                }
-
-                AnimatedVisibility(visible = showFadeMenu) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "Fade Out Trail Delays",
-                            fontSize = 11.sp,
-                            color = Color.White.copy(alpha = 0.6f),
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.padding(bottom = 4.dp)
-                        ) {
-                            DoodleState.fadeOptions.forEach { opt ->
-                                val optionLabel = opt.first
-                                val delayValue = opt.second
-                                val isSelected = fadeTimeSeconds == delayValue
-                                
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(
-                                            if (isSelected) brushColor else Color.White.copy(alpha = 0.08f)
-                                        )
-                                        .clickable {
-                                            DoodleState.fadeTimeSeconds.value = delayValue
-                                            showFadeMenu = false
-                                        }
-                                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                                ) {
-                                    Text(
-                                        text = optionLabel,
-                                        fontSize = 10.sp,
-                                        color = if (isSelected) Color.Black else Color.White
-                                    )
+                            DoodleState.colorPalette.take(4).forEach { color ->
+                                PresetColorDot(color = color, activeColor = brushColor) {
+                                    DoodleState.brushColor.value = color
+                                    DoodleState.updateCustomColorFromColor(color)
+                                    with(DoodleState) {
+                                        DoodleState.save(context, "brush_color", color.toArgbInt())
+                                        DoodleState.save(context, "custom_color_hue", DoodleState.customColorHue.value)
+                                        DoodleState.save(context, "custom_color_sat", DoodleState.customColorSat.value)
+                                        DoodleState.save(context, "custom_color_val", DoodleState.customColorVal.value)
+                                        DoodleState.save(context, "custom_color_tone", DoodleState.customColorTone.value)
+                                    }
                                 }
                             }
                         }
-                    }
-                }
 
-                // Small helpful Mode label
-                Text(
-                    text = if (isTouchThrough) "Watch Mode (Click-Through)" else "Pen Mode (Draw trails)",
-                    fontSize = 10.sp,
-                    color = if (isTouchThrough) Color(0xFFF472B6) else Color(0xFF818CF8),
-                    modifier = Modifier.padding(top = 6.dp)
-                )
-                if (sPenOnlyMode) {
-                    Text(
-                        text = "S Pen Palm Reject Active",
-                        fontSize = 9.sp,
-                        color = Color(0xFF818CF8),
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
+                        // Row 2 of presets
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        ) {
+                            DoodleState.colorPalette.drop(4).forEach { color ->
+                                PresetColorDot(color = color, activeColor = brushColor) {
+                                    DoodleState.brushColor.value = color
+                                    DoodleState.updateCustomColorFromColor(color)
+                                    with(DoodleState) {
+                                        DoodleState.save(context, "brush_color", color.toArgbInt())
+                                        DoodleState.save(context, "custom_color_hue", DoodleState.customColorHue.value)
+                                        DoodleState.save(context, "custom_color_sat", DoodleState.customColorSat.value)
+                                        DoodleState.save(context, "custom_color_val", DoodleState.customColorVal.value)
+                                        DoodleState.save(context, "custom_color_tone", DoodleState.customColorTone.value)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Thin subtle line divider
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(1.dp)
+                                .background(Color.White.copy(alpha = 0.12f))
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Compact Brush Size Slider Row
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp)
+                        ) {
+                            val context = LocalContext.current
+                            val brushWidthState by DoodleState.brushWidth.collectAsState()
+                            
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Brush Size Indicator",
+                                tint = Color.White.copy(alpha = 0.7f),
+                                modifier = Modifier.size(14.dp)
+                            )
+
+                            Slider(
+                                value = brushWidthState,
+                                onValueChange = {
+                                    DoodleState.brushWidth.value = it
+                                    DoodleState.save(context, "brush_width", it)
+                                },
+                                valueRange = 2f..24f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color.White,
+                                    activeTrackColor = Color.White.copy(alpha = 0.8f),
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(16.dp)
+                            )
+
+                            Text(
+                                text = "${brushWidthState.toInt()}px",
+                                color = Color.White.copy(alpha = 0.9f),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.width(32.dp),
+                                textAlign = TextAlign.End
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Thin subtle line divider
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(1.dp)
+                                .background(Color.White.copy(alpha = 0.12f))
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Padded custom spectrum sliders: Hue spectrum and Tone spectrum (for Black & White!)
+                        val hue by DoodleState.customColorHue.collectAsState()
+                        val sat by DoodleState.customColorSat.collectAsState()
+                        val valState by DoodleState.customColorVal.collectAsState()
+
+                        // Row 1: Hue spectrum slider
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier.size(20.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Palette,
+                                    contentDescription = "Color Palette Icon",
+                                    tint = Color.White.copy(alpha = 0.75f),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+
+                            val rainbowBrush = remember {
+                                androidx.compose.ui.graphics.Brush.Companion.horizontalGradient(
+                                    colors = listOf(
+                                        Color.Red, Color.Yellow, Color.Green, Color.Cyan, Color.Blue, Color.Magenta, Color.Red
+                                    )
+                                )
+                            }
+
+                            // Box wrapping the slider to overlay standard transparent tracks on top of a thin modern rainbow bar
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(16.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                // Thin elegant continuous gradient color spectrum track
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(4.dp)
+                                        .background(rainbowBrush, RoundedCornerShape(2.dp))
+                                )
+
+                                Slider(
+                                    value = hue,
+                                    onValueChange = { newHue ->
+                                        DoodleState.customColorHue.value = newHue
+                                        val updatedColor = Color.hsv(newHue, sat, valState)
+                                        DoodleState.brushColor.value = updatedColor
+
+                                        DoodleState.save(context, "custom_color_hue", newHue)
+                                        with(DoodleState) {
+                                            DoodleState.save(context, "brush_color", updatedColor.toArgbInt())
+                                        }
+                                    },
+                                    valueRange = 0f..360f,
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = Color.White, // Match the brush size style
+                                        activeTrackColor = Color.Transparent,
+                                        inactiveTrackColor = Color.Transparent
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(32.dp))
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Row 2: Tone spectrum slider (Black & White!)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp)
+                        ) {
+                            val tone by DoodleState.customColorTone.collectAsState()
+                            val pureHueColor = remember(hue) { Color.hsv(hue, 1.0f, 1.0f) }
+
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clip(CircleShape)
+                                    .background(brushColor)
+                                    .border(1.dp, Color.White, CircleShape)
+                            )
+
+                            // Box wrapping the slider to overlay standard transparent tracks on top of custom tone bar
+                            val toneBrush = remember(pureHueColor) {
+                                androidx.compose.ui.graphics.Brush.Companion.horizontalGradient(
+                                    colors = listOf(
+                                        Color.Black,
+                                        pureHueColor,
+                                        Color.White
+                                    )
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(16.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                // Thin elegant continuous gradient tone spectrum track
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(4.dp)
+                                        .background(toneBrush, RoundedCornerShape(2.dp))
+                                )
+
+                                Slider(
+                                    value = tone,
+                                    onValueChange = { newTone ->
+                                        DoodleState.customColorTone.value = newTone
+
+                                        // Map tone: 0.0 -> Black, 0.5 -> Pure Hue Color, 1.0 -> White
+                                        val newSat = if (newTone <= 0.5f) 1.0f else (1.0f - (newTone - 0.5f) * 2f).coerceIn(0f, 1f)
+                                        val newVal = if (newTone <= 0.5f) (newTone * 2f).coerceIn(0f, 1f) else 1.0f
+
+                                        DoodleState.customColorSat.value = newSat
+                                        DoodleState.customColorVal.value = newVal
+
+                                        val updatedColor = Color.hsv(hue, newSat, newVal)
+                                        DoodleState.brushColor.value = updatedColor
+
+                                        DoodleState.save(context, "custom_color_tone", newTone)
+                                        DoodleState.save(context, "custom_color_sat", newSat)
+                                        DoodleState.save(context, "custom_color_val", newVal)
+                                        with(DoodleState) {
+                                            DoodleState.save(context, "brush_color", updatedColor.toArgbInt())
+                                        }
+                                    },
+                                    valueRange = 0f..1f,
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = Color.White, // Match the brush size style
+                                        activeTrackColor = Color.Transparent,
+                                        inactiveTrackColor = Color.Transparent
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(32.dp))
+                        }
+                    }
                 }
             }
         }

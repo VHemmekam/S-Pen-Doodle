@@ -4,6 +4,9 @@
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <uses-feature android:name="com.sec.feature.spen_hardware" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -14,22 +17,41 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
+
+        <meta-data android:name="com.samsung.android.sdk.spen.enable" android:value="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.MyApplication">
+            android:theme="@style/Theme.TransparentActivity"
+            android:launchMode="singleInstance"
+            android:stateNotNeeded="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:noHistory="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Samsung S Pen Air Command Integration Shortcut filter -->
+            <intent-filter>
+                <action android:name="com.samsung.android.support.spen.ACTION_SHORTCUT" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
         <service
             android:name=".DoodleOverlayService"
             android:enabled="true"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Drawing overlay screen annotation utility" />
+        </service>
 
     </application>
 
