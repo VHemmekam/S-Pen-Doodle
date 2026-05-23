@@ -1,0 +1,6 @@
+{
+  "name": "S Pen Doodle",
+  "description": "An elegant overlay drawing and doodling canvas optimized for S Pen / Stylus. Draw custom fading trails on top of any video stream, series, or app with touch-through and S Pen pressure support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
